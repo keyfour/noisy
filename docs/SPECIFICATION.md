@@ -251,16 +251,19 @@ pub trait NoisyModule: Send + 'static {
     fn descriptor(&self) -> ModuleDescriptor;
 
     /// Serve commands until shutdown. Delivered one at a time on a Tokio task.
-    fn start(self, ctx: ModuleContext) -> JoinHandle<()>;
+    fn start(self: Box<Self>, ctx: ModuleContext) -> JoinHandle<()>;
 }
 
 pub struct ModuleContext {
     pub commands: CommandReceiver,      // (method, params, reply channel)
-    pub host: HostCtx,                  // emit, call, call_async, on, invoke_callback, log, now
+    pub host: HostCtx,                  // emit, call, call_async, on, invoke_callback, log, now_ms
     pub shutdown: CancellationToken,    // child token
     pub config: serde_json::Value,      // per-module configuration
 }
 ```
+
+The `Box<Self>` receiver keeps the trait object-safe: modules are stored and
+loaded as `Box<dyn NoisyModule>`.
 
 **Third-party C++ (or Rust) — dynamic `.so` over the C ABI** (Section 6):
 `noisy_module_create / command / tick / event / reply / stop / destroy`.
@@ -276,8 +279,8 @@ All signals share a common envelope:
 
 ```rust
 pub struct NoisyEvent {
-    pub source:    &'static str,        // "serial"
-    pub kind:      &'static str,        // "data_received"
+    pub source:    String,              // "serial"
+    pub kind:      String,              // "data_received"
     pub name:      String,              // "serial.data_received"
     pub payload:   serde_json::Value,
     pub timestamp: u64,                 // epoch milliseconds
@@ -699,12 +702,15 @@ languages:
 |---|---|
 | `emit(kind, payload)` | publish a signal to the bus (thread-safe) |
 | `call(module, method, params, timeout)` | synchronous request/reply to another module |
-| `call_async(module, method, params)` | fire a command; the reply arrives on the module's delivery thread |
-| `on(pattern)` / `off(id)` | connect / disconnect a slot |
+| `call_async(module, method, params)` | fire a command; the reply arrives on the module's command stream |
+| `on(pattern)` | connect a slot; the returned stream disconnects when dropped |
 | `invoke_callback(token, payload)` | call a language-native handler (e.g. a Lua closure) |
 | `log(level, msg, fields)` | emit a structured log entry |
 | `now_ms()` | epoch milliseconds |
-| `shutdown_flag()` | read-only cancellation indicator |
+| `module_name()` | this module's own name |
+
+The shutdown indicator is not a host service: every module receives it
+directly as `ctx.shutdown`, a child token of the engine's root token.
 
 Cross-module calls made inside another module's command dispatch that would
 re-enter that same module are rejected at runtime; use `call_async` for
@@ -839,12 +845,14 @@ noisy/
 │
 ├── crates/
 │   ├── noisy_core/                   ← event bus, module registry,
-│   │   └── src/                        descriptor bindings, Lua runtime,
-│   │       ├── lib.rs                 scheduler
+│   │   └── src/                        descriptor model, callbacks, scheduler
+│   │       ├── lib.rs
 │   │       ├── bus.rs
 │   │       ├── module.rs
 │   │       ├── registry.rs
-│   │       ├── lua_runtime.rs
+│   │       ├── callback.rs
+│   │       ├── error.rs
+│   │       ├── lua_runtime.rs        ← Phase 2
 │   │       └── scheduler.rs
 │   │
 │   ├── noisy_ffi/                    ← C ABI definitions and loader

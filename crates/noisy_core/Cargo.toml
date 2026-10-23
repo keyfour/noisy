@@ -1,0 +1,14 @@
+[package]
+name = "noisy_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "noisy core: event bus, module registry, descriptor model, scheduler"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
