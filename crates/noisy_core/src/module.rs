@@ -127,6 +127,11 @@ impl ModuleDescriptor {
     /// unique, parameter names are identifiers.
     pub fn validate(&self) -> Result<(), ModuleError> {
         check_identifier(&self.name, "module name").map_err(ModuleError::Descriptor)?;
+        if self.name == "noisy" {
+            return Err(ModuleError::Descriptor(
+                "module name `noisy` is reserved by the core".into(),
+            ));
+        }
         if self.version.trim().is_empty() {
             return Err(ModuleError::Descriptor(format!(
                 "module `{}`: empty version",
@@ -417,4 +422,45 @@ impl HostCtx {
     pub fn invoke_callback(&self, token: CallbackToken, payload: impl Into<Value>) -> bool {
         self.callbacks.invoke(token, payload)
     }
+
+    /// The shared callback hub (token allocation and routing).
+    pub fn callback_hub(&self) -> &CallbackHub {
+        &self.callbacks
+    }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn descriptors_validate_names_and_rejects_reserved() {
+        ModuleDescriptor::new("good_name")
+            .signals(["a", "b"])
+            .method("m")
+            .method_params("m2", ["x", "y"])
+            .validate()
+            .expect("valid descriptor");
+
+        for bad in ["", "1abc", "has-dash", "has.dot", "has space"] {
+            let err = ModuleDescriptor::new(bad).validate().unwrap_err();
+            assert!(matches!(err, ModuleError::Descriptor(_)), "{bad}: {err:?}");
+        }
+
+        let err = ModuleDescriptor::new("noisy").validate().unwrap_err();
+        assert!(err.to_string().contains("reserved"));
+
+        let mut dup_signal = ModuleDescriptor::new("m");
+        dup_signal.signals = vec!["a".into(), "a".into()];
+        let err = dup_signal.validate().unwrap_err();
+        assert!(err.to_string().contains("duplicate signal"));
+
+        let err = ModuleDescriptor::new("m")
+            .method("f")
+            .method("f")
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("duplicate method"));
+    }
+}
+
