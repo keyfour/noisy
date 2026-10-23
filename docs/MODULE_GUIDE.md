@@ -66,12 +66,15 @@ The engine provides every module with the same host context:
 |---|---|
 | `emit(kind, payload)` | publish a signal; thread-safe, fire-and-forget |
 | `call(module, method, params, timeout)` | synchronous request/reply; rejected on re-entrant recursion |
-| `call_async(module, method, params)` | command now; reply arrives on this module's delivery thread |
-| `on(pattern)` / `off(id)` | connect and disconnect slots |
+| `call_async(module, method, params)` | command now; reply arrives on this module's command stream |
+| `on(pattern)` | connect a slot; the returned `EventStream` disconnects when dropped |
 | `invoke_callback(token, payload)` | invoke a language-native handler (e.g. a Lua closure passed as a method argument) |
 | `log(level, msg, fields)` | structured log entry, also mirrored to the bus as `log.entry` |
 | `now_ms()` | epoch milliseconds |
-| `shutdown_flag()` | read-only indicator that the engine is shutting down |
+| `module_name()` | this module's own name |
+
+The shutdown indicator is not a host service: it arrives as `ctx.shutdown`,
+a child of the engine's root token.
 
 ---
 
@@ -109,20 +112,33 @@ impl NoisyModule for MySensor {
     fn descriptor(&self) -> ModuleDescriptor {
         ModuleDescriptor::new("mysensor")
             .signals(["reading", "error"])
-            .method("read", ["sensor_id"])
-            .method("set_interval", ["ms"])
+            .method_params("read", ["sensor_id"])
+            .method_params("set_interval", ["ms"])
             .depends(["serial"])
     }
 
-    fn start(self, ctx: ModuleContext) -> JoinHandle<()> {
+    fn start(self: Box<Self>, mut ctx: ModuleContext) -> JoinHandle<()> {
         tokio::spawn(async move {
-            while let Some(cmd) = ctx.commands.recv().await {
-                if ctx.shutdown.is_cancelled() { break; }
+            let this = *self;                       // move out of the box
+            let shutdown = ctx.shutdown.clone();    // token shared into the select below
+
+            loop {
                 tokio::select! {
-                    reply = self.dispatch(cmd.method(), cmd.params(), &ctx) => {
-                        cmd.reply(reply);
+                    maybe = ctx.commands.recv() => {
+                        let Some(cmd) = maybe else { break };   // command stream closed
+                        match cmd {
+                            Command::MethodCall(call) => {
+                                let reply = this
+                                    .dispatch(call.method(), call.params().clone(), &ctx)
+                                    .await;
+                                call.reply(reply);
+                            }
+                            Command::AsyncReply { .. } => {
+                                // settle a previous call_async (see host services)
+                            }
+                        }
                     }
-                    _ = ctx.shutdown.cancelled() => break,
+                    _ = shutdown.cancelled() => break,
                 }
             }
 
@@ -141,7 +157,7 @@ impl MySensor {
             "read" => {
                 let id  = params["sensor_id"].as_str().unwrap_or_default();
                 let now = ctx.host.now_ms();
-                ctx.emit("reading", json!({ "sensor_id": id, "value": sample() }))?;
+                ctx.host.emit("reading", json!({ "sensor_id": id, "value": sample() }));
                 Ok(json!({ "read_at": now }))
             }
             "set_interval" => {
@@ -156,14 +172,20 @@ impl MySensor {
 Notes:
 
 - Commands arrive one at a time; the module owns all state and needs no locks.
+- The command stream delivers two message kinds: `Command::MethodCall` (reply
+  with [`MethodCall::reply`]) and `Command::AsyncReply` (the settle of a
+  previous [`HostCtx::call_async`]).
 - A Lua function passed as a parameter arrives as a callback token; call it
-  with `ctx.invoke_callback(token, payload)`.
+  with `ctx.host.invoke_callback(token, payload)`.
 - Replies are `Result<Value, ModuleError>`; the core converts them for Lua.
+- `method("name")` declares a zero-parameter method; `method_params("name",
+  ["p"])` declares parameters. Rust cannot infer an empty parameter array's
+  item type through the generic builder, hence the two methods.
 
 Register it in `crates/engine/src/app.rs`:
 
 ```rust
-registry.load(Box::new(MySensor));
+registry.load(Box::new(MySensor), config).await?;
 ```
 
 ---
