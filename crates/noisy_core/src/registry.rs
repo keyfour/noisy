@@ -5,6 +5,7 @@
 use crate::bus::{core_events, EventBus, NoisyEvent};
 use crate::callback::CallbackHub;
 use crate::error::ModuleError;
+use crate::lua_runtime::{embedded_stdlib, LuaDeps};
 use crate::module::{
     Command, HostCtx, MethodCall, ModuleContext, ModuleDescriptor, NoisyModule,
 };
@@ -257,6 +258,30 @@ impl ModuleRegistry {
     /// handlers here.
     pub fn callbacks(&self) -> &CallbackHub {
         &self.callbacks
+    }
+
+    /// Descriptors of all loaded modules (the namespace source for Lua).
+    pub fn descriptors(&self) -> Vec<ModuleDescriptor> {
+        self.entries.values().map(|e| e.descriptor.clone()).collect()
+    }
+
+    /// Assembles the dependencies for the Lua runtime: an engine-level host
+    /// context (caller identity `noisy`), the root token, every loaded
+    /// descriptor, and the embedded stdlib.
+    pub fn lua_deps(&self) -> LuaDeps {
+        let mut deps = LuaDeps::new(
+            self.bus.clone(),
+            HostCtx::new(
+                ENGINE_CALLER.to_string(),
+                self.bus.clone(),
+                self.router.clone(),
+                self.callbacks.clone(),
+            ),
+            self.root.clone(),
+            self.descriptors(),
+        );
+        deps.stdlib = embedded_stdlib();
+        deps
     }
 
     /// Emits a core event (`source = "noisy"`).
