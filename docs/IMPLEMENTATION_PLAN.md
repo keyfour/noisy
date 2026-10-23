@@ -107,8 +107,10 @@ largest independent module.
 
 - mlua 5.4, safe standard libraries (all except `io`; restricted `os`);
   serde JSON boundary layer (the single converter).
-- Dispatch loop + job inbox (`BusEvent | TimerFired | ScriptReload`); all Lua
-  calls inside `pcall`; errors become `noisy.script_error` { path, line, message }.
+- Dispatch loop + job inbox (`BusEvent | InvokeCallback | RunSource |
+  ReloadScript | Eval | Shutdown`); all Lua calls inside `pcall`; errors
+  become `noisy.script_error` { path, line, message }. Timer callbacks
+  arrive as callback tokens, sharing the `InvokeCallback` path.
 - **Namespace generator:** descriptor → Lua global table. Positional Lua
   arguments pack into declared method params; a Lua function argument becomes
   a callback token; replies become tables. Global `noisy`:
