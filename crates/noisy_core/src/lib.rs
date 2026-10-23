@@ -11,6 +11,7 @@
 pub mod bus;
 pub mod callback;
 pub mod error;
+pub mod lua_runtime;
 pub mod module;
 pub mod registry;
 pub mod scheduler;
@@ -18,6 +19,7 @@ pub mod scheduler;
 pub use bus::{core_events, EventBus, EventStream, NoisyEvent};
 pub use callback::{CallbackEnvelope, CallbackHub, CallbackToken};
 pub use error::ModuleError;
+pub use lua_runtime::{embedded_stdlib, LuaDeps, LuaHandle, LuaJob, LuaRuntime, LUA_CALL_TIMEOUT};
 pub use module::{Command, HostCtx, LogLevel, MethodCall, MethodDecl, ModuleContext, ModuleDescriptor, NoisyModule};
 pub use registry::{
     ModuleRegistry, RegistryError, ShutdownReport, DEFAULT_BUS_CAPACITY, DEFAULT_COMMAND_CAPACITY, ENGINE_CALLER,
