@@ -1,0 +1,12 @@
+[package]
+name = "testplugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "testplugin"
+crate-type = ["cdylib"]
+
+[dependencies]
+serde_json = { workspace = true }

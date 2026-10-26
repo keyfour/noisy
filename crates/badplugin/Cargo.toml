@@ -1,0 +1,9 @@
+[package]
+name = "badplugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "badplugin"
+crate-type = ["cdylib"]
