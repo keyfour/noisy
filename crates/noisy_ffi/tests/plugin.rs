@@ -18,6 +18,7 @@ const TIMEOUT: Duration = Duration::from_secs(2);
 
 /// A fresh registry with the `probe` plugin loaded (no tick).
 async fn probe_registry() -> ModuleRegistry {
+    ensure_plugins_built();
     let mut registry = ModuleRegistry::new();
     let module =
         PluginModule::load(&plugin_so("testplugin"), 0).expect("probe plugin loads");
@@ -30,12 +31,40 @@ async fn probe_registry() -> ModuleRegistry {
 
 /// `target/debug/lib<name>.so`, relative to this crate.
 fn plugin_so(name: &str) -> PathBuf {
+    workspace_root()
+        .join("target/debug")
+        .join(format!("lib{name}.so"))
+}
+
+/// Builds the workspace's cdylibs once per test process: `cargo test` does
+/// not produce cdylib artifacts on its own.
+fn ensure_plugins_built() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let missing =
+            !plugin_so("testplugin").is_file() || !plugin_so("badplugin").is_file();
+        if !missing {
+            return;
+        }
+        let output = std::process::Command::new("cargo")
+            .args(["build", "-p", "testplugin", "-p", "badplugin"])
+            .current_dir(workspace_root())
+            .output()
+            .expect("cargo build spawns");
+        assert!(
+            output.status.success(),
+            "building the fixture cdylibs failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    });
+}
+
+fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
         .expect("crates/noisy_ffi sits two levels under the workspace")
-        .join("target/debug")
-        .join(format!("lib{name}.so"))
+        .to_path_buf()
 }
 
 /// Waits until one additional bus receiver is active: the plugin's
@@ -165,6 +194,7 @@ async fn shutdown_stops_the_plugin_cleanly() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wrong_abi_plugin_is_rejected_readably() {
+    ensure_plugins_built();
     let err = match PluginModule::load(&plugin_so("badplugin"), 0) {
         Err(err) => err,
         Ok(_) => panic!("badplugin must not load"),
