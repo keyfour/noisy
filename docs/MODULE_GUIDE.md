@@ -230,7 +230,8 @@ g++ -std=c++20 -shared -fPIC -I<sdk-include> mysensor.cpp -o noisy_mysensor.so
 ```
 
 Deploy: copy `noisy_mysensor.so` into `./modules/` or any directory listed in
-`$NOISY_MODULE_PATH`. From Lua:
+`$NOISY_MODULE_PATH` (or a directory added under `[plugins] paths` in the
+app's `engine.toml`). From Lua:
 
 ```lua
 noisy.use("mysensor")
@@ -238,6 +239,23 @@ local info = mysensor.read("s1")
 noisy.on("mysensor.reading", function(e)
     util.log("sensor " .. e.payload.sensor_id)
 end)
+```
+
+Engine-side knobs live in `engine.toml`, one table per module name:
+
+```toml
+# engine.toml
+[engine]                       # engine defaults
+log_level = "info"
+capacity = 1024                # bus capacity
+shutdown_timeout_ms = 2000
+
+[entry]                        # Lua entry (or type/name for a module entry)
+type = "lua"
+script = "app.lua"
+
+[mysensor]                     # per-module engine knob
+tick_interval_ms = 1000        # 0 disables the optional tick
 ```
 
 Threading contract (the whole story):
