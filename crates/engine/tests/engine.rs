@@ -18,6 +18,37 @@ const ENGINE: &str = env!("CARGO_BIN_EXE_noisy");
 const START_TIMEOUT: Duration = Duration::from_secs(30);
 const EXIT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Builds the workspace's cdylibs once per test process: `cargo test` does
+/// not produce cdylib artifacts on its own, and the fixtures need them.
+fn ensure_plugins_built() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        if target_dir().join("debug/libtestplugin.so").is_file()
+            && target_dir().join("debug/libbadplugin.so").is_file()
+        {
+            return;
+        }
+        let output = Command::new("cargo")
+            .args(["build", "-p", "testplugin", "-p", "badplugin"])
+            .current_dir(workspace_root())
+            .output()
+            .expect("cargo build spawns");
+        assert!(
+            output.status.success(),
+            "building the fixture cdylibs failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    });
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/engine sits two levels under the workspace")
+        .to_path_buf()
+}
+
 /// `target/` of the workspace, where `cargo build` leaves the cdylibs.
 fn target_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -29,11 +60,14 @@ fn target_dir() -> PathBuf {
 
 /// Recreates `target/e2e-<name>/{modules}` and copies the plugin in.
 fn fixture(name: &str, plugin_crate: &str) -> PathBuf {
-    let dir = target_dir().join(format!("e2e-{name}"));
+    ensure_plugins_built();
+    let dir = workspace_root()
+        .join("target")
+        .join(format!("e2e-{name}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("modules")).expect("fixture modules dir");
     std::fs::copy(
-        target_dir().join(format!("debug/lib{plugin_crate}.so")),
+        workspace_root().join(format!("target/debug/lib{plugin_crate}.so")),
         dir.join(format!("modules/lib{plugin_crate}.so")),
     )
     .expect("cdylib built by the workspace build");
