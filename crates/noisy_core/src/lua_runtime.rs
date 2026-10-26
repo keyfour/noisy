@@ -700,8 +700,26 @@ fn run_source(lua: &Lua, state: &Shared, bus: &EventBus, name: &str, source: &st
     }
 }
 
-fn eval_chunk(lua: &Lua, code: &str) -> Result<Value, String> {
-    let value: LuaValue = lua
+/// Compiles a Lua chunk without executing it (`--check` support): the
+/// same sandbox a runtime thread would use, validation only.
+pub fn check_script(source: &str, name: &str) -> Result<(), String> {
+    let lua = Lua::new_with(
+        StdLib::COROUTINE | StdLib::TABLE | StdLib::STRING | StdLib::UTF8 | StdLib::MATH
+            | StdLib::PACKAGE,
+        LuaOptions::default(),
+    )
+    .map_err(|err| format!("lua init failed: {err}"))?;
+    lua.load(source)
+        .set_name(name)
+        .into_function()
+        .map(|_| ())
+        .map_err(|err| {
+            let (path, line, message) = split_script_error(&err);
+            format!("{path}:{line}: {message}")
+        })
+}
+
+fn eval_chunk(lua: &Lua, code: &str) -> Result<Value, String> {    let value: LuaValue = lua
         .load(code)
         .set_name("eval")
         .eval()
@@ -852,8 +870,7 @@ pub fn lua_to_json(value: LuaValue) -> Result<Value, String> {
 }
 
 /// Converts JSON into a Lua value at the language boundary.
-pub fn json_to_lua(lua: &Lua, json: &Value) -> Result<LuaValue, mlua::Error> {
-    let value = match json {
+pub fn json_to_lua(lua: &Lua, json: &Value) -> Result<LuaValue, mlua::Error> {    let value = match json {
         Value::Null => LuaValue::Nil,
         Value::Bool(b) => LuaValue::Boolean(*b),
         Value::Number(n) => {
