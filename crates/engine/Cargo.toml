@@ -15,6 +15,10 @@ path = "src/main.rs"
 [dependencies]
 noisy_core = { path = "../noisy_core" }
 noisy_ffi = { path = "../noisy_ffi" }
+noisy_log = { path = "../modules/log" }
+noisy_timer = { path = "../modules/timer" }
+noisy_fs = { path = "../modules/fs" }
+noisy_crypto = { path = "../modules/crypto" }
 serde_json = { workspace = true }
 toml = { workspace = true }
 tokio = { workspace = true }
