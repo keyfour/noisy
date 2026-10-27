@@ -156,9 +156,9 @@ handlers via callback tokens; `fs` implements the full spec §4.3 surface with
 inotify watches; `crypto` is synchronous and event-free.
 
 **Acceptance:** per-module command round-trips and event assertions; fs
-watch ordering test; timer decision (sleep implementation measured simple
-block vs parked job) recorded in this plan's §5; each foundation module
-stays small (the guide's baseline size).
+watch ordering test; `timer.sleep` parks the calling Lua job and the
+turnaround benchmark is recorded in §5; each foundation module stays small
+(the guide's baseline size).
 
 ### Phase 5 — C++ SDK, examples, CI toolchain
 
@@ -266,9 +266,23 @@ e2e with an explanation.
 
 | Point | Where decided |
 |---|---|
-| `timer.sleep`: parked-job vs simple-block implementation | Phase 4 benchmark |
+| `timer.sleep`: parked-job vs simple-block implementation | Phase 4 (recording below) |
 | Bus capacity and command channel defaults | Phase 11 benchmarks |
 | Shutdown settle time default (spec names a configurable value) | Phase 11 |
+
+**`timer.sleep` — parked-job (coroutine suspension), chosen in Phase 4.**
+Every Lua entry point (entry chunks, event handlers, callback invocations)
+runs inside a fresh Lua coroutine. `timer.sleep(ms)` allocates a wake token,
+registers the calling coroutine under it, schedules the resume on the tokio
+runtime, and yields; the dispatch loop keeps serving events and timers
+throughout. Measured (asserted as an acceptance test in `noisy_timer`):
+event turnaround during a 150 ms sleep is < 50 ms — a simple-block
+implementation would measure ≥ 150 ms, with the dispatch loop frozen for
+the whole sleeper wait. The registry ids of parked sleeps are the Lua
+runtime's wake tokens; the `timer` module keeps refusing native
+(non-Lua) `sleep` calls with a readable pointer to `timer.after`. Known
+limitation: a yield cannot cross a C-call boundary, so `timer.sleep` at
+`require` time fails readably instead of corrupting state.
 
 ---
 
