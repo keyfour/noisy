@@ -5,11 +5,15 @@ use noisy_core::module::NoisyModule;
 use std::path::{Path, PathBuf};
 
 /// In-tree Rust modules, listed here per the module guide ("Rust module |
-/// listed in `engine/src/app.rs`"). The foundation modules (`log`, `timer`,
-/// `fs`, `crypto`) arrive in Phase 4; until then the engine boots cleanly
-/// with a dynamic-plugin-only or Lua-only application.
+/// listed in `engine/src/app.rs`"). The foundation modules load in this
+/// order: `log` first so every later log call gets mirrored from boot.
 pub fn in_tree_modules() -> Vec<Box<dyn NoisyModule>> {
-    Vec::new()
+    vec![
+        Box::new(noisy_log::LogModule::new()),
+        Box::new(noisy_timer::TimerModule::new()),
+        Box::new(noisy_fs::FsModule::new()),
+        Box::new(noisy_crypto::CryptoModule::new()),
+    ]
 }
 
 /// The resolved plugin search path (implementation plan §Phase 3):
