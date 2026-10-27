@@ -293,7 +293,7 @@ log.error("connection failed", { host = "db.local", port = 5432, retries = 3 })
 log.set_level("debug")   -- "debug"|"info"|"warn"|"error"
 
 -- Events (log entries also appear on the event bus)
--- log.entry    { level, msg, fields, timestamp }
+-- log.entry    { module, level, msg, fields, timestamp }
 
 -- Example: forward errors to a webhook
 noisy.on("log.entry", function(e)

@@ -627,13 +627,15 @@ async fn host_log_events_appear_on_the_bus() {
         .expect("poke ok");
 
     let mut event = rx.recv().await.unwrap();
-    while event.name != "logger.log_entry" {
+    while event.name != "log.entry" {
         event = rx.recv().await.unwrap();
     }
+    assert_eq!(event.source, "log");
+    assert_eq!(event.payload["module"], "logger");
     assert_eq!(event.payload["level"], "warn");
     assert_eq!(event.payload["msg"], "something odd");
     assert_eq!(event.payload["fields"]["id"], 3);
-    assert!(event.timestamp > 0);
+    assert!(event.payload["timestamp"].as_u64().unwrap_or(0) > 0);
 
     registry.shutdown(SHUTDOWN_TIMEOUT).await;
 }

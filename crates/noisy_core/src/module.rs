@@ -221,6 +221,14 @@ impl MethodCall {
         }
     }
 
+    /// A call without a replier, for direct `serve`-level tests across the
+    /// workspace (hidden from the public docs; the registry is the real
+    /// constructor of method calls).
+    #[doc(hidden)]
+    pub fn for_tests(method: impl Into<String>, params: Value) -> Self {
+        Self::new(method, params, None)
+    }
+
     /// The invoked method name.
     pub fn method(&self) -> &str {
         &self.method
@@ -378,14 +386,22 @@ impl HostCtx {
         self.bus.emit(NoisyEvent::new(self.module.clone(), kind, payload))
     }
 
-    /// Emits a structured log entry; also visible on the bus as
-    /// `"{module}.log_entry"`. The `log` module mirrors and filters these
-    /// (specification §4.6).
+    /// Publishes a structured log entry as the canonical `log.entry` bus
+    /// event (source `log`; the owning module travels in the `module`
+    /// field of the payload). The `log` module subscribes to it and mirrors
+    /// entries to the console under its level filter (specification §4.6).
     pub fn log(&self, level: LogLevel, msg: &str, fields: Option<Value>) {
-        self.emit(
-            "log_entry",
-            json!({ "level": level.as_str(), "msg": msg, "fields": fields.unwrap_or(json!({})) }),
-        );
+        self.bus.emit(NoisyEvent::new(
+            "log",
+            "entry",
+            json!({
+                "module": self.module.clone(),
+                "level": level.as_str(),
+                "msg": msg,
+                "fields": fields.unwrap_or(json!({})),
+                "timestamp": self.now_ms(),
+            }),
+        ));
     }
 
     /// Synchronous request/reply to another module with a timeout.

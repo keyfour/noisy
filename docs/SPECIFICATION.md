@@ -479,11 +479,15 @@ log.set_level(level)          -- "debug" | "info" | "warn" | "error"
 
 **Signals**
 ```
-log.entry               { level, msg, fields, timestamp }
+log.entry               { module, level, msg, fields, timestamp }
 ```
 
-**Rust internals:** `tracing` crate with a configurable subscriber. Log
-entries also flow through the event bus so scripts can react to them.
+**Rust internals:** `tracing` crate with a configurable subscriber. Every
+`HostCtx::log` call publishes the canonical `log.entry` event on the bus —
+the `module` field carries the logging module, the `timestamp` field the
+epoch milliseconds. The `log` module subscribes to `log.` and mirrors
+entries to the console through `tracing` under its level filter
+(`set_level` filters the mirror only; the bus always sees every entry).
 
 ---
 
