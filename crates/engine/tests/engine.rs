@@ -313,3 +313,69 @@ fn check_catches_a_broken_script() {
         "check failure is readable: {stderr}"
     );
 }
+
+#[test]
+fn foundation_modules_serve_a_combined_app() {
+    // No dynamic plugin: just the four in-tree foundation modules.
+    let dir = workspace_root().join("target").join("e2e-foundation");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("modules")).expect("fixture modules dir");
+    write_config(&dir);
+
+    let marker = dir.join("e2e-marker.txt");
+    let app = format!(
+        r#"
+log.info("boot", {{ phase = "foundation" }})
+local digest = crypto.hash("sha256", "abc")
+assert(digest == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "crypto.hash mismatch")
+
+fs.write({marker:?}, "written by noisy")
+
+local fired = false
+local id = timer.after(10, function()
+    fired = true
+    log.info("timer fired", {{ id = id }})
+end)
+assert(id > 0, "timer id is numeric")
+
+-- the parked sleep: the dispatch loop kept serving while we waited
+-- (the after is 10ms, the sleep 50ms, so the fire must land in between)
+timer.sleep(50)
+assert(fired, "timer.after fired before the sleep resumed")
+
+local content = fs.read({marker:?})
+assert(content == "written by noisy", "fs.read round trip")
+
+print("foundation ok: crypto.hash, fs write/read, timer.after/sleep, log")
+"#
+    );
+    std::fs::write(dir.join("app.lua"), app).expect("app.lua");
+
+    let mut engine = Engine::spawn(&dir, &[]);
+    engine.wait_for_stdout("foundation ok", START_TIMEOUT);
+    let code = engine.sigint_and_wait();
+    assert_eq!(code, Some(0), "clean exit after SIGINT");
+
+    assert_eq!(
+        std::fs::read_to_string(&marker).expect("marker survives"),
+        "written by noisy"
+    );
+}
+
+#[test]
+fn check_passes_foundation_syntax() {
+    let dir = workspace_root().join("target").join("e2e-check-foundation");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("modules")).expect("fixture modules dir");
+    write_config(&dir);
+    std::fs::write(
+        dir.join("app.lua"),
+        "timer.after(10, function() fs.write(\"x\", \"y\") end)\nlog.info(\"checking\")\n",
+    )
+    .expect("app.lua");
+
+    let mut engine = Engine::spawn(&dir, &["--check"]);
+    let code = engine.wait_for_exit(START_TIMEOUT);
+    assert_eq!(code, Some(0), "--check accepts foundation-module syntax");
+}
