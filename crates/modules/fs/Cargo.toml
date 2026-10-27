@@ -1,0 +1,19 @@
+[package]
+name = "noisy_fs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "noisy fs module: filesystem surface and inotify watching"
+
+[dependencies]
+noisy_core = { path = "../../noisy_core" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+inotify = "0.11"
+glob = "0.3"
+base64 = "0.22"
+
+[dev-dependencies]
+# none; watch fixtures live under the gitignored target dir
