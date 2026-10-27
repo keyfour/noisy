@@ -14,6 +14,14 @@
 //!   synchronous path into Lua), which is the no-re-entrancy guarantee.
 //! - Timer callbacks (Phase 4) arrive as [`CallbackHub`] tokens, i.e. the
 //!   same `LuaJob::InvokeCallback` path — one inbox, one delivery rule.
+//! - Every entry point (source chunks, event handlers, callback
+//!   invocations) runs inside a fresh Lua coroutine. A `timer.sleep(ms)`
+//!   inside one of them parks the coroutine: the runtime allocates a wake
+//!   token, schedules the resume job on the tokio runtime, and the calling
+//!   coroutine yields — so the dispatch loop keeps serving events and
+//!   other timers while the sleeper waits. A yield cannot cross a
+//!   C-call boundary, so `timer.sleep` at `require` time is unsupported
+//!   (it fails with a readably clear Lua error, not corruption).
 //!
 //! Every Lua execution goes through a protected entry point; errors become
 //! `noisy.script_error { path, line, message }` events and the loop
@@ -22,7 +30,7 @@
 use crate::bus::{event_matches, EventBus, NoisyEvent};
 use crate::callback::{CallbackEnvelope, CallbackToken};
 use crate::module::{HostCtx, MethodDecl, ModuleDescriptor};
-use mlua::{Function, Lua, LuaOptions, MultiValue, StdLib, Table, Value as LuaValue};
+use mlua::{Function, Lua, LuaOptions, MultiValue, StdLib, Table, Thread, Value as LuaValue};
 use serde_json::{Map, Value};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -87,6 +95,10 @@ pub struct LuaDeps {
     pub stdlib: BTreeMap<String, String>,
     /// Directories searched by `require` after the embedded stdlib.
     pub script_roots: Vec<PathBuf>,
+    /// The dispatch inbox: wake jobs for parked coroutines and every
+    /// other entry are delivered through it. Filled by `LuaRuntime::start`
+    /// before the dispatch thread sees these deps.
+    pub jobs: mpsc::Sender<LuaJob>,
 }
 
 impl LuaDeps {
@@ -97,6 +109,8 @@ impl LuaDeps {
         root: CancellationToken,
         descriptors: Vec<ModuleDescriptor>,
     ) -> Self {
+        // Placeholder channel; start() overwrites it with the real inbox.
+        let (jobs, _unused) = mpsc::channel(1);
         Self {
             bus,
             host,
@@ -105,6 +119,7 @@ impl LuaDeps {
             version: env!("CARGO_PKG_VERSION").to_string(),
             stdlib: BTreeMap::new(),
             script_roots: Vec::new(),
+            jobs,
         }
     }
 }
@@ -193,6 +208,8 @@ impl LuaRuntime {
     /// instance, plus Tokio forwarders for bus events and callback tokens.
     pub fn start(deps: LuaDeps) -> Self {
         let (tx, rx) = mpsc::channel::<LuaJob>(INBOX_CAPACITY);
+        let mut deps = deps;
+        deps.jobs = tx.clone();
 
         // The Lua runtime is the production consumer of callback tokens.
         let (sink_tx, sink_rx) = mpsc::channel::<CallbackEnvelope>(INBOX_CAPACITY);
@@ -303,6 +320,9 @@ struct Inner {
     subscriptions: BTreeMap<u64, Subscription>,
     next_subscription: u64,
     callbacks: HashMap<CallbackToken, Function>,
+    /// Parked coroutines: `timer.sleep` registered each one under its wake
+    /// token; `invoke_token` resumes and always removes the entry.
+    pending_wake: HashMap<CallbackToken, Thread>,
     used: HashSet<String>,
     current_chunk: Option<String>,
 }
@@ -330,6 +350,7 @@ fn dispatch_loop(deps: LuaDeps, rx: mpsc::Receiver<LuaJob>, rt: Handle) {
         subscriptions: BTreeMap::new(),
         next_subscription: 1,
         callbacks: HashMap::new(),
+        pending_wake: HashMap::new(),
         used: HashSet::new(),
         current_chunk: None,
     }));
@@ -339,7 +360,7 @@ fn dispatch_loop(deps: LuaDeps, rx: mpsc::Receiver<LuaJob>, rt: Handle) {
         return;
     }
     for descriptor in &deps.descriptors {
-        if let Err(err) = install_namespace(&lua, &state, descriptor, &deps.host, &rt) {
+        if let Err(err) = install_namespace(&lua, &state, descriptor, &deps.host, &rt, &deps.jobs) {
             tracing::error!(
                 module = %descriptor.name,
                 error = %err,
@@ -525,13 +546,80 @@ fn install_namespace(
     descriptor: &ModuleDescriptor,
     host: &HostCtx,
     rt: &Handle,
+    jobs: &mpsc::Sender<LuaJob>,
 ) -> Result<(), mlua::Error> {
     let namespace = lua.create_table()?;
     for decl in &descriptor.methods {
+        // `timer.sleep` is the one runtime-implemented method: the module
+        // side refuses native calls (the parked-job semantics are a Lua
+        // runtime capability), and the Lua binding below parks the calling
+        // coroutine. A yield cannot cross the C-call boundary of a Rust
+        // callback, so the yield itself lives in a pure-Lua wrapper over
+        // the native park primitive.
+        if descriptor.name == "timer" && decl.name == "sleep" {
+            let park = make_sleep_park(lua, state, host, rt.clone(), jobs.clone())?;
+            let factory: Function = lua
+                .load("return function(park) return function(ms) park(ms) coroutine.yield() end end")
+                .set_name("timer.sleep")
+                .eval()?;
+            let sleep = factory.call::<Function>(park)?;
+            namespace.set(decl.name.as_str(), sleep)?;
+            continue;
+        }
         let function = make_method_function(lua, state, &descriptor.name, decl, host, rt)?;
         namespace.set(decl.name.as_str(), function)?;
     }
     lua.globals().set(descriptor.name.as_str(), namespace)
+}
+
+/// The native half of `timer.sleep`: parks the calling coroutine. Called
+/// from inside a coroutine, it registers that coroutine under a fresh wake
+/// token and schedules the resume job for `ms` milliseconds later; the
+/// dispatch loop keeps serving other jobs meanwhile (the parked-job
+/// decision recorded in IMPLEMENTATION_PLAN §5).
+fn make_sleep_park(
+    lua: &Lua,
+    state: &Shared,
+    host: &HostCtx,
+    rt: Handle,
+    jobs: mpsc::Sender<LuaJob>,
+) -> Result<Function, mlua::Error> {
+    let host = host.clone();
+    let state = state.clone();
+    lua.create_function(move |lua, (ms,): (LuaValue,)| {
+        let ms: i64 = match &ms {
+            LuaValue::Integer(i) => *i,
+            LuaValue::Number(n) => *n as i64,
+            _ => {
+                return Err(mlua::Error::external(
+                    "timer.sleep: expects a millisecond count",
+                ))
+            }
+        };
+        if ms < 0 {
+            return Err(mlua::Error::external(
+                "timer.sleep: milliseconds must be non-negative",
+            ));
+        }
+
+        // The coroutine currently on top of this callback is the sleeper.
+        let thread = lua.current_thread();
+        let token = host.callback_hub().allocate_token();
+        state.borrow_mut().pending_wake.insert(token, thread);
+
+        let jobs = jobs.clone();
+        let started = std::time::Instant::now();
+        rt.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(ms as u64)).await;
+            let payload = serde_json::json!({
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+            });
+            let _ = jobs
+                .send(LuaJob::InvokeCallback(CallbackEnvelope { token, payload }))
+                .await;
+        });
+        Ok(token)
+    })
 }
 
 fn make_method_function(
@@ -641,6 +729,34 @@ fn install_require(lua: &Lua, deps: &LuaDeps) -> Result<(), mlua::Error> {
     lua.globals().set("require", require)
 }
 
+/// Runs a Lua function in a fresh coroutine and resumes it once. A parked
+/// (yielded) continuation stays suspended until its wake token fires;
+/// errors surface as `noisy.script_error` events and the loop continues.
+fn resume_entry(lua: &Lua, bus: &EventBus, piece: ResumePiece, args: LuaValue) {
+    let result = match piece {
+        ResumePiece::From(function) => lua
+            .create_thread(function)
+            .and_then(|thread| thread.resume::<MultiValue>(args)),
+        ResumePiece::Parked(thread) => thread.resume::<MultiValue>(args),
+    };
+    match result {
+        // Finished, or parked again via `timer.sleep` — either way the
+        // continuation is no longer this job's business.
+        Ok(_) => {}
+        Err(err) => {
+            let (path, line, message) = split_script_error(&err);
+            emit_script_error(bus, &path, line, &message);
+        }
+    }
+}
+
+/// What `resume_entry` executes: a function starting a fresh coroutine, or
+/// an already-parked coroutine being woken.
+enum ResumePiece {
+    From(Function),
+    Parked(Thread),
+}
+
 fn dispatch_event(lua: &Lua, state: &Shared, bus: &EventBus, event: &NoisyEvent) {
     let matching: Vec<u64> = state
         .borrow()
@@ -659,14 +775,22 @@ fn dispatch_event(lua: &Lua, state: &Shared, bus: &EventBus, event: &NoisyEvent)
         let Some(handler) = handler else { continue };
 
         let table = event_to_table(lua, event);
-        if let Err(err) = handler.call::<()>(table) {
-            let (path, line, message) = split_script_error(&err);
-            emit_script_error(bus, &path, line, &message);
-        }
+        resume_entry(lua, bus, ResumePiece::From(handler), LuaValue::Table(table));
     }
 }
 
 fn invoke_token(lua: &Lua, state: &Shared, bus: &EventBus, envelope: CallbackEnvelope) {
+    // A wake token resumes the parked coroutine it registered (potentially
+    // parking again for another sleep); everything else is a plain callback.
+    let parked = state.borrow_mut().pending_wake.remove(&envelope.token);
+    if let Some(thread) = parked {
+        match json_to_lua(lua, &envelope.payload) {
+            Ok(payload) => resume_entry(lua, bus, ResumePiece::Parked(thread), payload),
+            Err(err) => emit_script_error(bus, "noisy", 0, &format!("wake payload: {err}")),
+        }
+        return;
+    }
+
     let handler = state.borrow().callbacks.get(&envelope.token).cloned();
     let Some(handler) = handler else {
         emit_script_error(
@@ -678,20 +802,30 @@ fn invoke_token(lua: &Lua, state: &Shared, bus: &EventBus, envelope: CallbackEnv
         return;
     };
 
-    let payload = json_to_lua(lua, &envelope.payload);
-    if let Err(err) = handler.call::<()>(payload) {
-        let (path, line, message) = split_script_error(&err);
-        emit_script_error(bus, &path, line, &message);
+    match json_to_lua(lua, &envelope.payload) {
+        Ok(payload) => resume_entry(lua, bus, ResumePiece::From(handler), payload),
+        Err(err) => emit_script_error(bus, "noisy", 0, &format!("callback payload: {err}")),
     }
 }
 
 fn run_source(lua: &Lua, state: &Shared, bus: &EventBus, name: &str, source: &str) -> Result<(), String> {
     state.borrow_mut().current_chunk = Some(name.to_string());
-    let result = lua.load(source).set_name(name).exec();
+    let result = lua
+        .load(source)
+        .set_name(name)
+        .into_function()
+        .and_then(|function| {
+            lua.create_thread(function).and_then(|thread| {
+                // Running to completion and parking both count as a
+                // successful start; the entry script may park forever
+                // (e.g. an app driven by `timer.every`).
+                thread.resume::<MultiValue>(())
+            })
+        });
     state.borrow_mut().current_chunk = None;
 
     match result {
-        Ok(()) => Ok(()),
+        Ok(_) => Ok(()),
         Err(err) => {
             let (path, line, message) = split_script_error(&err);
             emit_script_error(bus, &path, line, &message);
