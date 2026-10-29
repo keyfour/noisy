@@ -284,6 +284,25 @@ runtime's wake tokens; the `timer` module keeps refusing native
 limitation: a yield cannot cross a C-call boundary, so `timer.sleep` at
 `require` time fails readably instead of corrupting state.
 
+**C++ SDK — `call_async` only (no synchronous `call`), chosen in Phase 5.**
+The plan's Phase 5 sketch named a `ctx.call` wrapper. On the actor contract
+(sdk/cpp/noisy.hpp) every C++ line runs inside a dispatched callback, and
+the engine rejects re-entrant synchronous calls from inside command
+dispatch by design — a sync `call` from a C++ module could deadlock or fail
+out of the box. The SDK therefore offers `ctx.call_async(module, method,
+params, on_reply)`: the reply arrives on the module's own actor as
+`noisy_module_reply`, correlated by the returned call id. This mirrors how
+every other module settles cross-module traffic; Rust and Lua keep their
+blocking `call` because they sit outside the actor.
+
+**C++ SDK — vendored pinned `nlohmann/json.hpp` (v3.12.0), chosen in
+Phase 5.** Handler signatures speak `nlohmann::json` (specification §7
+dependency table). The single header is vendored at
+`sdk/cpp/nlohmann/json.hpp` so a module builds with one `-I` flag and no
+network; `scripts/bash/vendor_deps.sh` re-fetches it sha256-verified and in
+place, and `scripts/bash/build_cpp_examples.sh` is the single build path
+for all C++ artifacts (CI C++ stage and the cargo e2e fixtures alike).
+
 ---
 
 ## 6. Test and CI strategy
@@ -293,7 +312,7 @@ limitation: a yield cannot cross a C-call boundary, so `timer.sleep` at
 | Core unit + lifecycle | `tests/rust/` | `cargo test` |
 | Module tests | module crates | `cargo test` |
 | C ABI / loader | `tests/rust/abi_*` + Rust cdylib module | `cargo test` |
-| C++ SDK and modules | `tests/cpp/` | CI C++ stage driving the real engine |
+| C++ SDK and modules | `crates/engine/tests/cpp_e2e.rs` | engine e2e via `cargo test`; CI C++ stage builds the examples |
 | Lua suites | `tests/lua/*.lua` with `test.lua` | `scripts/python/test_lua.py` |
 | Application e2e | `tests/e2e/` driving the built binary | CI shell |
 
