@@ -30,3 +30,22 @@ jobs:
 
       - name: tests (parallel)
         run: cargo test
+
+  cpp:
+    name: cpp sdk
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: pinned compiler (g++-13)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends g++-13
+
+      # Pinned dependency acquisition (specification §7): idempotent,
+      # sha256-verified; a no-op when the vendored file is up to date.
+      - name: vendor dependencies
+        run: scripts/bash/vendor_deps.sh
+
+      - name: build examples (warnings as errors)
+        run: env CXX=g++-13 scripts/bash/build_cpp_examples.sh
