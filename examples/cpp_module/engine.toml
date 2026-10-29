@@ -1,0 +1,9 @@
+[engine]
+log_level = "info"
+
+[entry]
+type = "lua"
+script = "app.lua"
+
+[mysensor]
+tick_interval_ms = 100

@@ -1,0 +1,10 @@
+[engine]
+log_level = "info"
+
+[entry]
+type = "module"
+name = "myapp"
+
+[myapp]
+# the first heartbeat fires immediately; 100 ms keeps the startup snappy
+tick_interval_ms = 100
